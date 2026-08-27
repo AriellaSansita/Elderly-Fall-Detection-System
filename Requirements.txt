@@ -1,10 +1,10 @@
 streamlit
 tensorflow
 mediapipe
+imageio
+imageio-ffmpeg
 scikit-learn
 pandas
 numpy
 matplotlib
 pillow
-imageio
-imageio-ffmpeg
