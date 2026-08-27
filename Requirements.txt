@@ -1,9 +1,10 @@
 streamlit
 tensorflow
 mediapipe
-opencv-python-headless
 scikit-learn
 pandas
 numpy
 matplotlib
 pillow
+imageio
+imageio-ffmpeg
