@@ -6,6 +6,4 @@ scikit-learn
 pandas
 numpy
 matplotlib
-seaborn
 pillow
-tqdm
