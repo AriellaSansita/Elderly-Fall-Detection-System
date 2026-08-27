@@ -1,35 +1,12 @@
-"""
-STEP 7: Streamlit Deployment Dashboard
------------------------------------------
-Deploy this to Streamlit Cloud (streamlit.io) after training.
-
-BEFORE DEPLOYING, make sure these 3 files (produced by
-2_train_and_evaluate.py) are in the same folder as this app.py:
-    - fall_detection_model.h5
-    - label_encoder.pkl
-    - scaler.pkl
-
-requirements.txt for Streamlit Cloud should include:
-    streamlit
-    tensorflow
-    mediapipe
-    opencv-python-headless
-    scikit-learn
-    pandas
-    numpy
-    matplotlib
-    pillow
-"""
-
 import streamlit as st
 import numpy as np
-import cv2
 import mediapipe as mp
 import pickle
 import pandas as pd
 import matplotlib.pyplot as plt
 from tensorflow.keras.models import load_model
 from PIL import Image
+import imageio.v3 as iio
 
 st.set_page_config(page_title="Elderly Fall Detection System", layout="wide")
 
@@ -53,13 +30,12 @@ pose = mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5)
 if "history" not in st.session_state:
     st.session_state.history = []  # list of (label, confidence)
 
-# ---------------- Helper: run full pipeline on one frame ----------------
-def predict_frame(frame_bgr):
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+# ---------------- Helper: run full pipeline on one frame (RGB array) ----------------
+def predict_frame(frame_rgb):
     results = pose.process(frame_rgb)
 
     if not results.pose_landmarks:
-        return None, None, frame_bgr
+        return None, None, frame_rgb
 
     row = []
     for lm in results.pose_landmarks.landmark:
@@ -72,7 +48,7 @@ def predict_frame(frame_bgr):
     label = le.inverse_transform([pred_idx])[0]
     confidence = float(probs[pred_idx])
 
-    annotated = frame_bgr.copy()
+    annotated = frame_rgb.copy()
     mp_drawing.draw_landmarks(annotated, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
 
     return label, confidence, annotated
@@ -90,18 +66,17 @@ with col_upload:
     if file is not None:
         if file.type.startswith("image"):
             image = Image.open(file).convert("RGB")
-            frame = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            frame_rgb = np.array(image)
 
-            label, confidence, annotated = predict_frame(frame)
+            label, confidence, annotated = predict_frame(frame_rgb)
 
             if label is None:
                 st.warning("No person detected in this image.")
             else:
                 st.session_state.history.append((label, confidence))
-                st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB),
-                          caption="Pose Estimation Output", use_container_width=True)
+                st.image(annotated, caption="Pose Estimation Output", use_container_width=True)
 
-                if label.lower() == "fall detected" or label.lower() == "fall":
+                if label.lower() in ("fall detected", "fall"):
                     st.error(f"🚨 EMERGENCY ALERT: Fall Detected! (confidence {confidence:.1%})")
                 else:
                     st.success(f"Activity: **{label}** (confidence {confidence:.1%})")
@@ -111,29 +86,22 @@ with col_upload:
             with open(tfile_path, "wb") as f:
                 f.write(file.read())
 
-            cap = cv2.VideoCapture(tfile_path)
             frame_placeholder = st.empty()
             alert_placeholder = st.empty()
-            frame_count = 0
 
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                frame_count += 1
-                if frame_count % 5 != 0:   # sample every 5th frame for speed
+            # Read video frames using imageio instead of cv2.VideoCapture
+            for frame_count, frame_rgb in enumerate(iio.imiter(tfile_path, plugin="pyav")):
+                if frame_count % 5 != 0:  # sample every 5th frame for speed
                     continue
 
-                label, confidence, annotated = predict_frame(frame)
+                label, confidence, annotated = predict_frame(frame_rgb)
                 if label is not None:
                     st.session_state.history.append((label, confidence))
-                    frame_placeholder.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB),
-                                              caption=f"Frame {frame_count} — {label} ({confidence:.1%})",
-                                              use_container_width=True)
+                    frame_placeholder.image(annotated,
+                                            caption=f"Frame {frame_count} — {label} ({confidence:.1%})",
+                                            use_container_width=True)
                     if label.lower() in ("fall detected", "fall"):
                         alert_placeholder.error(f"🚨 EMERGENCY ALERT: Fall Detected at frame {frame_count}!")
-
-            cap.release()
 
 with col_stats:
     st.subheader("📊 Monitoring Analytics")
@@ -160,4 +128,4 @@ with col_stats:
 
     if st.button("Reset session stats"):
         st.session_state.history = []
-        st.experimental_rerun()
+        st.rerun()
