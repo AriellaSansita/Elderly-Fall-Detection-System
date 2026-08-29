@@ -1,10 +1,9 @@
 streamlit
-tensorflow
+opencv-python-headless
 mediapipe
-imageio
-imageio-ffmpeg
-scikit-learn
-pandas
+tensorflow
 numpy
+scikit-learn
 matplotlib
+seaborn
 pillow
