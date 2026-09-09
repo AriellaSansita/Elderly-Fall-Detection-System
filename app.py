@@ -1,12 +1,19 @@
 """
-Fall / Activity Detection — Streamlit App
-==========================================
+Elderly Fall / Activity Detection — Streamlit App (FA-2)
+=========================================================
 Loads the CNN trained in the companion Colab notebook
-(fall_detection_model.h5 + class_names.txt) and lets a user upload or
-capture an image to classify it into one of the 5 activity classes:
-Fall, Walking, Sitting, Standing, Normal.
+(fall_detection_model.h5 + class_names.txt) and lets a caregiver
+upload an image, take a photo, or upload a video to classify activity
+into one of 5 classes: Fall, Walking, Sitting, Standing, Normal.
 
-Optionally overlays the MediaPipe BlazePose skeleton on the image.
+Covers FA-2 Step 7 requirements:
+- Upload images
+- Upload videos
+- Run AI predictions
+- Display fall alerts (emergency notification)
+- Show monitoring analytics (totals, fall count, normal count,
+  confidence score, activity distribution chart)
+- Pose visualization overlay (MediaPipe)
 
 Run with:
     streamlit run app.py
@@ -18,10 +25,13 @@ Expected files in the same folder as this script:
 """
 
 import os
+import time
 import urllib.request
+from collections import Counter
 
 import cv2
 import numpy as np
+import pandas as pd
 import streamlit as st
 import tensorflow as tf
 from PIL import Image
@@ -41,6 +51,8 @@ POSE_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
     "pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
 )
+FALL_LABEL = "Fall"          # must match the class name used in class_names.txt
+VIDEO_SAMPLE_EVERY_N_FRAMES = 15  # classify roughly ~2 frames/sec at 30fps video
 
 # Standard 33-point BlazePose skeleton connections (stable across versions)
 POSE_CONNECTIONS = [
@@ -51,7 +63,7 @@ POSE_CONNECTIONS = [
     (27, 29), (28, 30), (29, 31), (30, 32), (27, 31), (28, 32),
 ]
 
-st.set_page_config(page_title="Activity / Fall Detection", page_icon="🏃", layout="centered")
+st.set_page_config(page_title="Elderly Fall Detection", page_icon="🚨", layout="centered")
 
 
 # ----------------------------------------------------------------------
@@ -91,11 +103,30 @@ def load_pose_detector():
 
 
 # ----------------------------------------------------------------------
+# Session state — monitoring analytics accumulate across the session
+# ----------------------------------------------------------------------
+def init_session_state():
+    if "history" not in st.session_state:
+        # each entry: {"label": str, "confidence": float, "source": str, "timestamp": float}
+        st.session_state.history = []
+
+
+def log_prediction(label: str, confidence: float, source: str):
+    st.session_state.history.append(
+        {"label": label, "confidence": confidence, "source": source, "timestamp": time.time()}
+    )
+
+
+def reset_session():
+    st.session_state.history = []
+
+
+# ----------------------------------------------------------------------
 # Core logic
 # ----------------------------------------------------------------------
-def classify_image(model, class_names, pil_image: Image.Image):
-    """Resize/normalize a PIL image and run the CNN. Returns (label, probs dict)."""
-    img = pil_image.convert("RGB").resize(IMG_SIZE)
+def classify_array(model, class_names, rgb_array: np.ndarray):
+    """Resize/normalize an RGB numpy image and run the CNN. Returns (label, probs dict)."""
+    img = Image.fromarray(rgb_array).convert("RGB").resize(IMG_SIZE)
     arr = np.array(img).astype("float32") / 255.0
     arr = np.expand_dims(arr, axis=0)  # batch dim
 
@@ -135,11 +166,106 @@ def draw_pose_on_array(detector, bgr_image: np.ndarray) -> tuple[np.ndarray, boo
     return annotated, True
 
 
+def show_fall_alert(label: str, confidence: float):
+    """Explicit emergency alert banner, as required by the FA-2 brief."""
+    if label == FALL_LABEL:
+        st.error(
+            f"🚨 **EMERGENCY ALERT — FALL DETECTED** 🚨\n\n"
+            f"Confidence: {confidence:.1%}. Notify caregiver / emergency contact immediately."
+        )
+    else:
+        st.success(f"✅ Normal activity detected: **{label}** ({confidence:.1%} confidence)")
+
+
+def render_session_analytics():
+    """Monitoring analytics panel: totals, fall count, normal count, distribution chart."""
+    history = st.session_state.history
+    st.subheader("📊 Monitoring Analytics")
+
+    if not history:
+        st.caption("No activity recorded yet this session.")
+        return
+
+    total = len(history)
+    fall_count = sum(1 for h in history if h["label"] == FALL_LABEL)
+    normal_count = sum(1 for h in history if h["label"] != FALL_LABEL)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total activities detected", total)
+    c2.metric("Fall events", fall_count, delta=None)
+    c3.metric("Normal activity count", normal_count)
+
+    counts = Counter(h["label"] for h in history)
+    dist_df = pd.DataFrame({"Activity": list(counts.keys()), "Count": list(counts.values())})
+    dist_df = dist_df.set_index("Activity")
+    st.bar_chart(dist_df)
+
+    with st.expander("View detailed prediction log"):
+        log_df = pd.DataFrame(history)
+        log_df["time"] = pd.to_datetime(log_df["timestamp"], unit="s").dt.strftime("%H:%M:%S")
+        st.dataframe(log_df[["time", "source", "label", "confidence"]], use_container_width=True)
+
+    if st.button("🔄 Reset session analytics"):
+        reset_session()
+        st.rerun()
+
+
+def process_video(model, class_names, pose_detector, video_path: str, show_pose: bool):
+    """Samples frames from an uploaded video, classifies each, logs results,
+    and shows a live progress bar plus a summary once done."""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        st.error("Could not open the uploaded video.")
+        return
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    progress = st.progress(0, text="Processing video...")
+    frame_idx = 0
+    processed = 0
+    fall_frame_preview = None
+    last_annotated_preview = None
+
+    while True:
+        ret, frame_bgr = cap.read()
+        if not ret:
+            break
+
+        if frame_idx % VIDEO_SAMPLE_EVERY_N_FRAMES == 0:
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            label, probs = classify_array(model, class_names, rgb)
+            log_prediction(label, probs[label], source="video")
+            processed += 1
+
+            if show_pose:
+                annotated_bgr, _ = draw_pose_on_array(pose_detector, frame_bgr)
+                last_annotated_preview = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+            else:
+                last_annotated_preview = rgb
+
+            if label == FALL_LABEL and fall_frame_preview is None:
+                fall_frame_preview = last_annotated_preview
+
+        frame_idx += 1
+        progress.progress(min(frame_idx / total_frames, 1.0), text=f"Processing video... ({frame_idx}/{total_frames} frames)")
+
+    cap.release()
+    progress.empty()
+    st.success(f"Video processed: {processed} frames analyzed.")
+
+    if fall_frame_preview is not None:
+        st.error("🚨 A fall was detected at least once in this video.")
+        st.image(fall_frame_preview, caption="First detected fall frame", use_container_width=True)
+    elif last_annotated_preview is not None:
+        st.image(last_annotated_preview, caption="Last analyzed frame", use_container_width=True)
+
+
 # ----------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------
-st.title("🏃 Activity / Fall Detection")
-st.caption("Upload a photo or use your camera to classify: Fall, Walking, Sitting, Standing, Normal.")
+init_session_state()
+
+st.title("🚨 Elderly Fall / Activity Detection")
+st.caption("Upload a photo, take a picture, or upload a video to monitor activity and detect falls.")
 
 with st.sidebar:
     st.header("Options")
@@ -155,53 +281,95 @@ model = load_model()
 class_names = load_class_names()
 pose_detector = load_pose_detector() if show_pose else None
 
-tab_upload, tab_camera = st.tabs(["📁 Upload Image", "📷 Camera"])
+tab_upload, tab_camera, tab_video = st.tabs(["📁 Upload Image", "📷 Camera", "🎥 Upload Video"])
 
-image_source = None
+# ---- Image upload tab ----
 with tab_upload:
-    uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
+    uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"], key="img_uploader")
     if uploaded_file is not None:
         image_source = Image.open(uploaded_file)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Input")
+            st.image(image_source, use_container_width=True)
 
+        with st.spinner("Classifying..."):
+            rgb_arr = np.array(image_source.convert("RGB"))
+            label, probs = classify_array(model, class_names, rgb_arr)
+            log_prediction(label, probs[label], source="image")
+
+        bgr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+        if show_pose:
+            annotated_bgr, person_found = draw_pose_on_array(pose_detector, bgr)
+            display_img = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+        else:
+            display_img = rgb_arr
+            person_found = None
+
+        with col2:
+            st.subheader("Result")
+            st.image(display_img, use_container_width=True)
+            if show_pose and person_found is False:
+                st.caption("⚠️ No person detected for pose overlay.")
+
+        st.markdown("---")
+        show_fall_alert(label, probs[label])
+        if show_probs:
+            st.bar_chart(probs)
+
+# ---- Camera tab ----
 with tab_camera:
     camera_file = st.camera_input("Take a photo")
     if camera_file is not None:
         image_source = Image.open(camera_file)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Input")
+            st.image(image_source, use_container_width=True)
 
-if image_source is not None:
-    col1, col2 = st.columns(2)
+        with st.spinner("Classifying..."):
+            rgb_arr = np.array(image_source.convert("RGB"))
+            label, probs = classify_array(model, class_names, rgb_arr)
+            log_prediction(label, probs[label], source="camera")
 
-    with col1:
-        st.subheader("Input")
-        st.image(image_source, use_container_width=True)
-
-    with st.spinner("Classifying..."):
-        label, probs = classify_image(model, class_names, image_source)
-
-    bgr = cv2.cvtColor(np.array(image_source.convert("RGB")), cv2.COLOR_RGB2BGR)
-
-    if show_pose:
-        with st.spinner("Detecting pose..."):
+        bgr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+        if show_pose:
             annotated_bgr, person_found = draw_pose_on_array(pose_detector, bgr)
-        display_img = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-    else:
-        display_img = np.array(image_source.convert("RGB"))
-        person_found = None
+            display_img = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+        else:
+            display_img = rgb_arr
+            person_found = None
 
-    with col2:
-        st.subheader("Result")
-        st.image(display_img, use_container_width=True)
-        if show_pose and person_found is False:
-            st.caption("⚠️ No person detected for pose overlay.")
+        with col2:
+            st.subheader("Result")
+            st.image(display_img, use_container_width=True)
+            if show_pose and person_found is False:
+                st.caption("⚠️ No person detected for pose overlay.")
 
-    st.markdown("---")
-    confidence = probs[label]
-    if label.lower() == "fall":
-        st.error(f"### Prediction: **{label}**  ({confidence:.1%} confidence)")
-    else:
-        st.success(f"### Prediction: **{label}**  ({confidence:.1%} confidence)")
+        st.markdown("---")
+        show_fall_alert(label, probs[label])
+        if show_probs:
+            st.bar_chart(probs)
 
-    if show_probs:
-        st.bar_chart(probs)
-else:
-    st.info("Upload an image or take a photo to get a prediction.")
+# ---- Video upload tab ----
+with tab_video:
+    st.caption(
+        f"Frames are sampled every {VIDEO_SAMPLE_EVERY_N_FRAMES} frames "
+        "(not every single frame) to keep processing fast."
+    )
+    video_file = st.file_uploader("Choose a video", type=["mp4", "mov", "avi", "mkv"], key="video_uploader")
+    if video_file is not None:
+        st.video(video_file)
+        if st.button("▶️ Run analysis on this video"):
+            # Write to a temp file since OpenCV needs a filesystem path
+            temp_path = os.path.join("temp_uploaded_video." + video_file.name.split(".")[-1])
+            with open(temp_path, "wb") as f:
+                f.write(video_file.getbuffer())
+            try:
+                process_video(model, class_names, pose_detector, temp_path, show_pose)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+st.markdown("---")
+render_session_analytics()
