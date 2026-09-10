@@ -4,7 +4,7 @@ Elderly Fall / Activity Detection — Streamlit App (FA-2)
 Loads the CNN trained in the companion Colab notebook
 (fall_detection_model.h5 + class_names.txt) and lets a caregiver
 upload an image, take a photo, or upload a video to classify activity
-into one of 5 classes: Fall, Walking, Sitting, Standing, Normal.
+into one of 3 classes: Falling, Lying, Normal.
 
 Covers FA-2 Step 7 requirements:
 - Upload images
@@ -51,7 +51,8 @@ POSE_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
     "pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
 )
-FALL_LABEL = "Fall"          # must match the class name used in class_names.txt
+FALL_LABEL = "Falling"        # must match the class name used in class_names.txt
+LYING_LABEL = "Lying"         # post-fall / person-down state
 VIDEO_SAMPLE_EVERY_N_FRAMES = 15  # classify roughly ~2 frames/sec at 30fps video
 
 # Standard 33-point BlazePose skeleton connections (stable across versions)
@@ -170,8 +171,13 @@ def show_fall_alert(label: str, confidence: float):
     """Explicit emergency alert banner, as required by the FA-2 brief."""
     if label == FALL_LABEL:
         st.error(
-            f"🚨 **EMERGENCY ALERT — FALL DETECTED** 🚨\n\n"
+            f"🚨 **EMERGENCY ALERT — FALL IN PROGRESS** 🚨\n\n"
             f"Confidence: {confidence:.1%}. Notify caregiver / emergency contact immediately."
+        )
+    elif label == LYING_LABEL:
+        st.warning(
+            f"⚠️ **Person appears to be lying down** — possible post-fall state.\n\n"
+            f"Confidence: {confidence:.1%}. Check on them if this is unexpected."
         )
     else:
         st.success(f"✅ Normal activity detected: **{label}** ({confidence:.1%} confidence)")
@@ -188,12 +194,14 @@ def render_session_analytics():
 
     total = len(history)
     fall_count = sum(1 for h in history if h["label"] == FALL_LABEL)
-    normal_count = sum(1 for h in history if h["label"] != FALL_LABEL)
+    lying_count = sum(1 for h in history if h["label"] == LYING_LABEL)
+    normal_count = sum(1 for h in history if h["label"] not in (FALL_LABEL, LYING_LABEL))
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total activities detected", total)
-    c2.metric("Fall events", fall_count, delta=None)
-    c3.metric("Normal activity count", normal_count)
+    c2.metric("Fall events", fall_count)
+    c3.metric("Lying events", lying_count)
+    c4.metric("Normal activity count", normal_count)
 
     counts = Counter(h["label"] for h in history)
     dist_df = pd.DataFrame({"Activity": list(counts.keys()), "Count": list(counts.values())})
